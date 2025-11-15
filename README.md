@@ -5,6 +5,8 @@ Automated wrapper for Claude Code that runs tasks repeatedly with automatic git 
 ## 🚀 Quick start
 
 ```bash
+curl -o run_claude.sh https://raw.githubusercontent.com/AnandChowdhary/continuous-claude/refs/heads/main/run_claude.sh
+chmod +x run_claude.sh
 ./run_claude.sh -p "your prompt" -m max_runs
 ```
 
