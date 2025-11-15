@@ -5,6 +5,8 @@ ADDITIONAL_FLAGS="--dangerously-skip-permissions --output-format json"
 PROMPT=""
 MAX_RUNS=""
 GIT_BRANCH_PREFIX="continuous-claude/"
+GITHUB_OWNER=""
+GITHUB_REPO=""
 ERROR_LOG=""
 error_count=0
 extra_iterations=0
@@ -27,6 +29,14 @@ parse_arguments() {
                 GIT_BRANCH_PREFIX="$2"
                 shift 2
                 ;;
+            --owner)
+                GITHUB_OWNER="$2"
+                shift 2
+                ;;
+            --repo)
+                GITHUB_REPO="$2"
+                shift 2
+                ;;
             *)
                 shift
                 ;;
@@ -37,18 +47,30 @@ parse_arguments() {
 validate_arguments() {
     if [ -z "$PROMPT" ]; then
         echo "❌ Error: Prompt is required. Use -p to provide a prompt." >&2
-        echo "Usage: $0 -p \"your prompt\" -m max_runs" >&2
+        echo "Usage: $0 -p \"your prompt\" -m max_runs --owner owner --repo repo" >&2
         exit 1
     fi
 
     if [ -z "$MAX_RUNS" ]; then
         echo "❌ Error: MAX_RUNS is required. Use -m to provide max runs (0 for infinite)." >&2
-        echo "Usage: $0 -p \"your prompt\" -m max_runs" >&2
+        echo "Usage: $0 -p \"your prompt\" -m max_runs --owner owner --repo repo" >&2
         exit 1
     fi
 
     if ! [[ "$MAX_RUNS" =~ ^[0-9]+$ ]]; then
         echo "❌ Error: MAX_RUNS must be a non-negative integer (0 for infinite)" >&2
+        exit 1
+    fi
+
+    if [ -z "$GITHUB_OWNER" ]; then
+        echo "❌ Error: GitHub owner is required. Use --owner to provide the owner." >&2
+        echo "Usage: $0 -p \"your prompt\" -m max_runs --owner owner --repo repo" >&2
+        exit 1
+    fi
+
+    if [ -z "$GITHUB_REPO" ]; then
+        echo "❌ Error: GitHub repo is required. Use --repo to provide the repo." >&2
+        echo "Usage: $0 -p \"your prompt\" -m max_runs --owner owner --repo repo" >&2
         exit 1
     fi
 }
@@ -67,6 +89,110 @@ validate_requirements() {
             exit 1
         fi
     fi
+
+    if ! command -v gh &> /dev/null; then
+        echo "❌ Error: GitHub CLI (gh) is not installed: https://cli.github.com" >&2
+        exit 1
+    fi
+
+    if ! gh auth status >/dev/null 2>&1; then
+        echo "❌ Error: GitHub CLI is not authenticated. Run 'gh auth login' first." >&2
+        exit 1
+    fi
+}
+
+wait_for_pr_checks() {
+    local pr_number="$1"
+    local owner="$2"
+    local repo="$3"
+    local iteration_display="$4"
+    local max_iterations=30
+    local iteration=0
+
+    while [ $iteration -lt $max_iterations ]; do
+        local checks_json
+        if ! checks_json=$(gh pr checks "$pr_number" --repo "$owner/$repo" --json state,conclusion 2>/dev/null); then
+            echo "⚠️  $iteration_display Failed to get PR checks status" >&2
+            return 1
+        fi
+
+        local all_completed=true
+        local all_success=true
+        local check_count=$(echo "$checks_json" | jq 'length')
+
+        if [ "$check_count" -eq 0 ]; then
+            echo "⏳ $iteration_display Waiting for checks to start..." >&2
+            sleep 60
+            iteration=$((iteration + 1))
+            continue
+        fi
+
+        local idx=0
+        while [ $idx -lt $check_count ]; do
+            local state=$(echo "$checks_json" | jq -r ".[$idx].state")
+            local conclusion=$(echo "$checks_json" | jq -r ".[$idx].conclusion // \"pending\"")
+
+            if [ "$state" != "completed" ]; then
+                all_completed=false
+                break
+            fi
+
+            if [ "$conclusion" != "success" ] && [ "$conclusion" != "null" ]; then
+                all_success=false
+                break
+            fi
+
+            idx=$((idx + 1))
+        done
+
+        if [ "$all_completed" = "true" ] && [ "$all_success" = "true" ]; then
+            echo "✅ $iteration_display All PR checks passed" >&2
+            return 0
+        fi
+
+        if [ "$all_completed" = "true" ] && [ "$all_success" = "false" ]; then
+            echo "❌ $iteration_display PR checks failed" >&2
+            return 1
+        fi
+
+        echo "⏳ $iteration_display Waiting for PR checks to complete... ($((iteration + 1))/$max_iterations)" >&2
+        sleep 60
+        iteration=$((iteration + 1))
+    done
+
+    echo "⏱️  $iteration_display Timeout waiting for PR checks (30 minutes)" >&2
+    return 1
+}
+
+merge_pr_and_cleanup() {
+    local pr_number="$1"
+    local owner="$2"
+    local repo="$3"
+    local branch_name="$4"
+    local iteration_display="$5"
+    local current_branch="$6"
+
+    echo "🔀 $iteration_display Merging PR #$pr_number..." >&2
+    if ! gh pr merge "$pr_number" --repo "$owner/$repo" --merge >/dev/null 2>&1; then
+        echo "⚠️  $iteration_display Failed to merge PR (may have conflicts or be blocked)" >&2
+        return 1
+    fi
+
+    echo "📥 $iteration_display Pulling latest from main..." >&2
+    if ! git checkout "$current_branch" >/dev/null 2>&1; then
+        echo "⚠️  $iteration_display Failed to checkout $current_branch" >&2
+        return 1
+    fi
+
+    if ! git pull origin "$current_branch" >/dev/null 2>&1; then
+        echo "⚠️  $iteration_display Failed to pull from $current_branch" >&2
+        return 1
+    fi
+
+    echo "🗑️  $iteration_display Deleting local branch: $branch_name" >&2
+    git branch -d "$branch_name" >/dev/null 2>&1 || true
+
+    return 0
 }
 
 continuous_claude_commit() {
@@ -97,18 +223,59 @@ continuous_claude_commit() {
     
     commit_prompt="Please review the dirty files in the git repository, write a commit message with: (1) a short one-line summary, (2) two newlines, (3) then a detailed explanation. Do not include any footers or metadata like 'Generated with Claude Code' or 'Co-Authored-By'. Feel free to look at the last few commits to get a sense of the commit message style. Track all files and commit the changes using 'git commit -am \"your message\"' (don't push, just commit, no need to ask for confirmation)."
     
-    if claude -p "$commit_prompt" --allowedTools "Bash(git)" --dangerously-skip-permissions >/dev/null 2>&1; then
-        if git diff --quiet && git diff --cached --quiet; then
-            echo "📦 $iteration_display Changes committed on branch: $branch_name" >&2
-            git checkout "$current_branch" >/dev/null 2>&1
-        else
-            echo "⚠️  $iteration_display Commit command ran but changes still present" >&2
-            git checkout "$current_branch" >/dev/null 2>&1
-        fi
-    else
+    if ! claude -p "$commit_prompt" --allowedTools "Bash(git)" --dangerously-skip-permissions >/dev/null 2>&1; then
         echo "⚠️  $iteration_display Failed to commit changes" >&2
         git checkout "$current_branch" >/dev/null 2>&1
+        return 1
     fi
+
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        echo "⚠️  $iteration_display Commit command ran but changes still present" >&2
+        git checkout "$current_branch" >/dev/null 2>&1
+        return 1
+    fi
+
+    echo "📦 $iteration_display Changes committed on branch: $branch_name" >&2
+
+    local commit_message=$(git log -1 --format="%B" "$branch_name")
+    local commit_title=$(echo "$commit_message" | head -n 1)
+    local commit_body=$(echo "$commit_message" | tail -n +4)
+
+    echo "📤 $iteration_display Pushing branch..." >&2
+    if ! git push -u origin "$branch_name" >/dev/null 2>&1; then
+        echo "⚠️  $iteration_display Failed to push branch" >&2
+        git checkout "$current_branch" >/dev/null 2>&1
+        return 1
+    fi
+
+    echo "🔨 $iteration_display Creating pull request..." >&2
+    local pr_output
+    if ! pr_output=$(gh pr create --repo "$GITHUB_OWNER/$GITHUB_REPO" --title "$commit_title" --body "$commit_body" --base main 2>&1); then
+        echo "⚠️  $iteration_display Failed to create PR: $pr_output" >&2
+        git checkout "$current_branch" >/dev/null 2>&1
+        return 1
+    fi
+
+    local pr_number=$(echo "$pr_output" | grep -oE '(pull/|#)[0-9]+' | grep -oE '[0-9]+' | head -n 1)
+    if [ -z "$pr_number" ]; then
+        echo "⚠️  $iteration_display Failed to extract PR number from: $pr_output" >&2
+        git checkout "$current_branch" >/dev/null 2>&1
+        return 1
+    fi
+
+    echo "🔍 $iteration_display PR #$pr_number created, waiting for checks..." >&2
+    if ! wait_for_pr_checks "$pr_number" "$GITHUB_OWNER" "$GITHUB_REPO" "$iteration_display"; then
+        echo "⚠️  $iteration_display PR checks failed or timed out" >&2
+        git checkout "$current_branch" >/dev/null 2>&1
+        return 1
+    fi
+
+    if ! merge_pr_and_cleanup "$pr_number" "$GITHUB_OWNER" "$GITHUB_REPO" "$branch_name" "$iteration_display" "$current_branch"; then
+        return 1
+    fi
+
+    echo "✅ $iteration_display PR merged and local branch cleaned up" >&2
+    return 0
 }
 
 get_iteration_display() {
@@ -186,11 +353,6 @@ handle_iteration_success() {
     local result="$2"
     local iteration_num="$3"
     
-    error_count=0
-    if [ $extra_iterations -gt 0 ]; then
-        extra_iterations=$((extra_iterations - 1))
-    fi
-    
     echo "📝 $iteration_display Output:" >&2
     local result_text=$(echo "$result" | jq -r '.result // empty')
     if [ -n "$result_text" ]; then
@@ -207,8 +369,23 @@ handle_iteration_success() {
     fi
 
     echo "✅ $iteration_display Work completed" >&2
-    continuous_claude_commit "$iteration_display" "$iteration_num"
+    if ! continuous_claude_commit "$iteration_display" "$iteration_num"; then
+        error_count=$((error_count + 1))
+        extra_iterations=$((extra_iterations + 1))
+        echo "❌ $iteration_display PR merge queue failed ($error_count consecutive errors)" >&2
+        if [ $error_count -ge 3 ]; then
+            echo "❌ Fatal: 3 consecutive errors occurred. Exiting." >&2
+            exit 1
+        fi
+        return 1
+    fi
+    
+    error_count=0
+    if [ $extra_iterations -gt 0 ]; then
+        extra_iterations=$((extra_iterations - 1))
+    fi
     successful_iterations=$((successful_iterations + 1))
+    return 0
 }
 
 execute_single_iteration() {
