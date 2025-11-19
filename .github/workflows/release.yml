@@ -154,13 +154,12 @@ jobs:
           # Check if CHANGELOG.md exists
           if [ ! -f CHANGELOG.md ]; then
             echo "Creating new CHANGELOG.md..."
-            echo "# Changelog" > CHANGELOG.md
+            echo "# CHANGELOG" > CHANGELOG.md
             echo "" >> CHANGELOG.md
             
-            # Fetch all releases using gh cli
-            # We need to be careful about API limits if there are many releases, but for now let's try fetching all
-            # We sort by publishedAt desc
-            gh release list --limit 1000 --json tagName,publishedAt,name,body --template '{{range .}}{{printf "## [%s] - %s\n\n%s\n\n" .tagName (.publishedAt | time "2006-01-02") .body}}{{end}}' >> CHANGELOG.md
+            # Fetch all releases using gh api (because gh release list doesn't return body)
+            # We use jq to format the output
+            gh api repos/${{ github.repository }}/releases --paginate | jq -r '.[] | "## [" + .tag_name + "] - " + (.published_at | split("T")[0]) + "\n\n" + (.body // "") + "\n\n"' >> CHANGELOG.md
           fi
           
           # Prepend new release notes to CHANGELOG.md
@@ -180,10 +179,10 @@ jobs:
           echo "" >> new_entry.md
           
           # If CHANGELOG.md exists (which it should now), we need to insert new_entry.md after the header
-          # Assuming the first line is "# Changelog"
+          # Assuming the first line is "# CHANGELOG"
           
           # Create a temp file with the header
-          echo "# Changelog" > temp_changelog.md
+          echo "# CHANGELOG" > temp_changelog.md
           echo "" >> temp_changelog.md
           
           # Add the new entry
