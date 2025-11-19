@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## [v0.7.0] - 2025-11-19
+
+### What's Changed
+
+- :white_check_mark: Add comprehensive tests for completion signal handling (a5c6234)
+- :sparkles: Introduce completion signal feature to early stop project iterations (df7e912)
+- :construction_worker: Add conditions to skip releases if the main script is unchanged or commits are test/CI/docs only (372e114)
+- :construction_worker: Adjust markdown heading levels in generated changelog by replacing `##` with `###` in release bodies and notes. (20efb2d)
+
+**Full Changelog**: https://github.com/AnandChowdhary/continuous-claude/compare/v0.6.4...v0.7.0
+
+### Installation
+
+Install with a single command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AnandChowdhary/continuous-claude/refs/tags/v0.7.0/install.sh | bash
+```
+
+Or download the script directly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AnandChowdhary/continuous-claude/refs/tags/v0.7.0/continuous_claude.sh -o continuous-claude
+chmod +x continuous-claude
+sudo mv continuous-claude /usr/local/bin/
+```
+
 ## [v0.6.4] - 2025-11-19
 
 ## What's Changed
