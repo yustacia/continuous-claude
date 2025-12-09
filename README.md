@@ -1,4 +1,4 @@
-# 🔂 Continuous Claude
+# ![Continuous Claude](https://github.com/user-attachments/assets/52f7faaf-893c-4b2f-8d90-49808193b247)
 
 <details data-embed="anandchowdhary.com" data-title="Continuous Claude" data-summary="Run Claude Code in a loop repeatedly to do large projects">
   <summary>Automated workflow that orchestrates Claude Code in a continuous loop, autonomously creating PRs, waiting for checks, and merging - so multi-step projects complete while you sleep.</summary>
