@@ -970,7 +970,7 @@ merge_pr_and_cleanup() {
     local iteration_display="$5"
     local current_branch="$6"
 
-    echo "🔄 $iteration_display Updating branch with latest from main..." >&2
+    echo "🔄 $iteration_display Updating branch with latest from $current_branch..." >&2
     local update_output
     if update_output=$(gh pr update-branch "$pr_number" --repo "$owner/$repo" 2>&1); then
         echo "📥 $iteration_display Branch updated, re-checking PR status..." >&2
@@ -982,6 +982,49 @@ merge_pr_and_cleanup() {
         # Check if update failed due to conflicts or just because branch is already up-to-date
         if echo "$update_output" | grep -qi "already up-to-date\|is up to date"; then
             echo "✅ $iteration_display Branch already up-to-date" >&2
+        elif echo "$update_output" | grep -qi "conflict"; then
+            echo "⚠️  $iteration_display Conflict detected, attempting to resolve by merging $current_branch..." >&2
+
+            # Try to merge base branch into PR branch and resolve NOTES_FILE conflicts
+            if git fetch origin "$current_branch" >/dev/null 2>&1 && git merge "origin/$current_branch" --no-edit 2>/dev/null; then
+                echo "✅ $iteration_display Merge successful without conflicts" >&2
+            else
+                # Check if NOTES_FILE has conflict
+                if git diff --name-only --diff-filter=U 2>/dev/null | grep -q "^${NOTES_FILE}$"; then
+                    echo "📝 $iteration_display Resolving $NOTES_FILE conflict by keeping current branch version..." >&2
+                    git checkout --ours "$NOTES_FILE" 2>/dev/null
+                    git add "$NOTES_FILE" 2>/dev/null
+                fi
+
+                # Check if there are still unresolved conflicts
+                if [ -n "$(git diff --name-only --diff-filter=U 2>/dev/null)" ]; then
+                    echo "❌ $iteration_display Unresolved conflicts in files other than $NOTES_FILE:" >&2
+                    git diff --name-only --diff-filter=U >&2
+                    git merge --abort 2>/dev/null || true
+                    return 1
+                fi
+
+                # Complete the merge
+                if ! git commit --no-edit 2>/dev/null; then
+                    echo "⚠️  $iteration_display Failed to complete merge commit" >&2
+                    git merge --abort 2>/dev/null || true
+                    return 1
+                fi
+                echo "✅ $iteration_display Conflict resolved, merge completed" >&2
+            fi
+
+            # Push the resolved merge
+            if ! git push origin "$branch_name" >/dev/null 2>&1; then
+                echo "⚠️  $iteration_display Failed to push resolved merge" >&2
+                return 1
+            fi
+            echo "📤 $iteration_display Pushed resolved merge" >&2
+
+            # Re-check PR status after conflict resolution
+            if ! wait_for_pr_checks "$pr_number" "$owner" "$repo" "$iteration_display"; then
+                echo "❌ $iteration_display PR checks failed after conflict resolution" >&2
+                return 1
+            fi
         else
             echo "⚠️  $iteration_display Branch update failed: $update_output" >&2
             return 1
@@ -1008,7 +1051,7 @@ merge_pr_and_cleanup() {
         return 1
     fi
 
-    echo "📥 $iteration_display Pulling latest from main..." >&2
+    echo "📥 $iteration_display Pulling latest from $current_branch..." >&2
     if ! git checkout "$current_branch" >/dev/null 2>&1; then
         echo "⚠️  $iteration_display Failed to checkout $current_branch" >&2
         return 1
